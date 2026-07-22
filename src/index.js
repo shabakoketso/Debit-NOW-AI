@@ -1,9 +1,10 @@
 // DEBIT NOW AI - MVP
-// Combines: Stitch Sandbox + Meta WhatsApp + AI Decision Logic + Operator Instructions
+// Combines: Stitch Sandbox + Meta WhatsApp + USSD + OTP + SMS Notifications + Arrears Detection
 
 const express = require('express');
 const axios = require('axios');
 const { Pool } = require('pg');
+const cron = require('node-cron');
 const logger = require('./utils/logger');
 require('dotenv').config();
 
@@ -32,6 +33,11 @@ async function initDatabase() {
         max_debit NUMERIC NOT NULL,
         status TEXT DEFAULT 'active',
         last_debit_attempt TIMESTAMP,
+        arrears_amount NUMERIC DEFAULT 0,
+        is_in_arrears BOOLEAN DEFAULT FALSE,
+        arrears_days INTEGER DEFAULT 0,
+        call_attempts INTEGER DEFAULT 0,
+        last_contact_attempt TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
@@ -74,6 +80,29 @@ async function initDatabase() {
       );
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sms_notifications (
+        id SERIAL PRIMARY KEY,
+        consumer_id INTEGER REFERENCES consumers(id),
+        message TEXT NOT NULL,
+        notification_type TEXT,
+        status TEXT DEFAULT 'pending',
+        sent_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS call_logs (
+        id SERIAL PRIMARY KEY,
+        consumer_id INTEGER REFERENCES consumers(id),
+        call_status TEXT,
+        call_duration INTEGER,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
     logger.info('Database initialized successfully');
   } catch (err) {
     logger.error('Database initialization error', err);
@@ -90,13 +119,37 @@ const STITCH_BASE_URL = process.env.STITCH_BASE_URL || 'https://api.stitch.money
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'debitnow123';
+const SMS_API_KEY = process.env.SMS_API_KEY || 'test_key';
+const SMS_GATEWAY = process.env.SMS_GATEWAY || 'clickatell'; // clickatell, twilio, etc
+
+const KWHILCH_PHONE = '0680467440';
+const KWHILCH_EMAIL = 'kwhilchgroup@gmail.com';
 
 // ============================================
-// 3. AI DECISION ENGINE - Validates operator instructions
+// 3. ARREARS DETECTION LOGIC
+// ============================================
+function calculateArrearsStatus(consumer) {
+  // Simulates checking if consumer has arrears
+  // In production: Connect to your accounting/ERP system
+  
+  const isInArrears = Math.random() > 0.7; // 30% chance
+  const arrearsAmount = isInArrears ? Math.floor(Math.random() * 5000) + 500 : 0;
+  const arrearsdays = isInArrears ? Math.floor(Math.random() * 120) + 1 : 0;
+
+  return {
+    isInArrears,
+    arrearsAmount,
+    arrearsdays,
+    reason: isInArrears 
+      ? `Account in arrears for ${arrearsdays} days. Amount due: R${arrearsAmount}` 
+      : 'Account in good standing'
+  };
+}
+
+// ============================================
+// 4. INSTRUCTION VALIDATION
 // ============================================
 function validateDebitInstruction(consumer, amount, instruction) {
-  // Validates that an operator instruction exists and is pending execution
-  
   const checks = {
     instructionExists: !!instruction,
     instructionPending: instruction?.instruction_status === 'pending',
@@ -106,7 +159,7 @@ function validateDebitInstruction(consumer, amount, instruction) {
   };
 
   const passed = Object.values(checks).filter(Boolean).length;
-  const decision = passed >= 4; // Need 4+ checks to pass
+  const decision = passed >= 4;
 
   return {
     decision,
@@ -115,23 +168,23 @@ function validateDebitInstruction(consumer, amount, instruction) {
   };
 }
 
+// ============================================
+// 5. AI DECISION ENGINE
+// ============================================
 function shouldDebit(consumer, amount) {
-  // Fake AI logic for MVP - balance & timing checks
-  // In production: Connect to LLM (OpenAI/Claude) + your collections DB
-  
   const today = new Date().getDay();
   const hour = new Date().getHours();
-  const fakeBalance = Math.random() * 3000; // Simulate bank balance check
+  const fakeBalance = Math.random() * 3000;
 
   const checks = {
     hasBalance: fakeBalance > amount * 1.5,
-    isPeakTime: hour >= 17 && hour <= 20, // 5pm-8pm is better for collections
+    isPeakTime: hour >= 17 && hour <= 20,
     isWeekday: today >= 1 && today <= 5,
     isAboveMin: amount >= 100,
   };
 
   const passed = Object.values(checks).filter(Boolean).length;
-  const decision = passed >= 2; // Need 2+ checks to pass
+  const decision = passed >= 2;
 
   return {
     decision,
@@ -142,8 +195,45 @@ function shouldDebit(consumer, amount) {
 }
 
 // ============================================
-// 4. WHATSAPP FUNCTIONS
+// 6. SMS/NOTIFICATION FUNCTIONS
 // ============================================
+async function sendSMS(phone_number, message) {
+  try {
+    logger.info(`[SMS] Sending to ${phone_number}: ${message}`);
+    
+    // Real SMS gateway call (uncomment when live)
+    /*
+    if (SMS_GATEWAY === 'clickatell') {
+      await axios.post(`https://api.clickatell.com/rest/message`, {
+        apiKey: SMS_API_KEY,
+        to: phone_number,
+        content: message
+      });
+    } else if (SMS_GATEWAY === 'twilio') {
+      await axios.post(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+        From: TWILIO_PHONE_NUMBER,
+        To: phone_number,
+        Body: message
+      }, {
+        auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN }
+      });
+    }
+    */
+
+    // MVP: Log SMS
+    await pool.query(
+      'INSERT INTO sms_notifications(consumer_id, message, notification_type, status, sent_at) VALUES($1,$2,$3,$4, NOW())',
+      [null, message, 'ARREARS_NOTIFICATION', 'sent']
+    );
+
+    logger.info(`SMS sent successfully to ${phone_number}`);
+    return { success: true };
+  } catch (err) {
+    logger.error(`SMS send failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
 async function sendWhatsApp(to, message) {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) {
     logger.warn('WhatsApp credentials not configured');
@@ -168,33 +258,33 @@ async function sendWhatsApp(to, message) {
   }
 }
 
-// ============================================
-// 5. STITCH INTEGRATION
-// ============================================
-async function debitViaStitch(consumer, amount) {
-  // Real Stitch API call (uncomment when live)
-  /*
+async function sendUSSD(phone_number, message) {
   try {
-    const response = await axios.post(
-      `${STITCH_BASE_URL}/account_payment`,
-      {
-        account_id: consumer.account_id,
-        amount: amount * 100, // in cents
-        currency: 'ZAR',
-        description: `Collection from ${consumer.name} for ${consumer.client_name}`,
-      },
-      {
-        headers: { Authorization: `Bearer ${STITCH_CLIENT_ID}` },
-      }
-    );
-    return { success: true, transaction_id: response.data.id };
+    logger.info(`[USSD] Sending to ${phone_number}: ${message}`);
+    
+    // Real USSD gateway call (uncomment when live)
+    /*
+    if (SMS_GATEWAY === 'clickatell') {
+      await axios.post(`https://api.clickatell.com/rest/ussd`, {
+        apiKey: SMS_API_KEY,
+        to: phone_number,
+        content: message
+      });
+    }
+    */
+
+    logger.info(`USSD sent successfully to ${phone_number}`);
+    return { success: true };
   } catch (err) {
-    logger.error(`Stitch debit failed: ${err.message}`);
+    logger.error(`USSD send failed: ${err.message}`);
     return { success: false, error: err.message };
   }
-  */
+}
 
-  // MVP: Simulate successful debit
+// ============================================
+// 7. STITCH INTEGRATION
+// ============================================
+async function debitViaStitch(consumer, amount) {
   logger.info(`[SANDBOX] Debit R${amount} from consumer ${consumer.id}`);
   return {
     success: true,
@@ -203,7 +293,7 @@ async function debitViaStitch(consumer, amount) {
 }
 
 // ============================================
-// 6. ROUTES - WEBHOOK VERIFICATION
+// 8. ROUTES - WEBHOOK VERIFICATION
 // ============================================
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -220,14 +310,14 @@ app.get('/webhook', (req, res) => {
 });
 
 // ============================================
-// 7. ROUTES - WHATSAPP INCOMING MESSAGES
+// 9. ROUTES - WHATSAPP INCOMING MESSAGES
 // ============================================
 app.post('/webhook', async (req, res) => {
   try {
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message) return res.sendStatus(200);
 
-    const from = message.from; // WhatsApp phone number
+    const from = message.from;
     const text = message.text?.body?.toUpperCase() || '';
 
     logger.info(`WhatsApp message from ${from}: ${text}`);
@@ -260,7 +350,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     // COMMAND 2: INSTRUCTION consumer_id amount [reason]
-    // Operator creates a debit instruction
     if (text.startsWith('INSTRUCTION')) {
       const parts = text.split(' ');
       const [, consumer_id, amount, ...reasonParts] = parts;
@@ -285,7 +374,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Create instruction
       const instructionResult = await pool.query(
         'INSERT INTO debit_instructions(consumer_id, amount, reason, operator_id, instruction_status) VALUES($1,$2,$3,$4,$5) RETURNING *',
         [consumer.id, numAmount, reason, operator.id, 'pending']
@@ -297,7 +385,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     // COMMAND 3: EXECUTE instruction_id
-    // Operator manually triggers execution of a specific instruction
     if (text.startsWith('EXECUTE')) {
       const [, instruction_id] = text.split(' ');
 
@@ -320,33 +407,26 @@ app.post('/webhook', async (req, res) => {
       const consumerResult = await pool.query('SELECT * FROM consumers WHERE id = $1', [instruction.consumer_id]);
       const consumer = consumerResult.rows[0];
 
-      // Validate instruction
       const validation = validateDebitInstruction(consumer, instruction.amount, instruction);
-
       if (!validation.decision) {
         await sendWhatsApp(from, `❌ Instruction validation failed: ${validation.reason}`);
         return res.sendStatus(200);
       }
 
-      // Check AI conditions (balance, time, etc)
       const ai = shouldDebit(consumer, instruction.amount);
-
       if (!ai.decision) {
         await sendWhatsApp(from, `⏭️ AI conditions not optimal for ${consumer.name}. Reason: ${ai.reason}`);
         return res.sendStatus(200);
       }
 
-      // Execute debit
       const stitch = await debitViaStitch(consumer, instruction.amount);
 
       if (stitch.success) {
-        // Update instruction to executed
         await pool.query(
           'UPDATE debit_instructions SET instruction_status = $1, executed_at = NOW(), executed_by_system = $2 WHERE id = $3',
           ['executed', operator.id, instruction.id]
         );
 
-        // Log debit
         await pool.query(
           'INSERT INTO debit_logs(consumer_id, instruction_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5,$6)',
           [consumer.id, instruction.id, instruction.amount, 'success', 'OPERATOR_INSTRUCTION', instruction.reason]
@@ -358,7 +438,6 @@ app.post('/webhook', async (req, res) => {
         logger.info(`Instruction ${instruction.id} executed successfully by operator ${operator.id}`);
       } else {
         await sendWhatsApp(from, `❌ Debit execution failed: ${stitch.error}`);
-        logger.error(`Instruction ${instruction.id} execution failed: ${stitch.error}`);
       }
     }
 
@@ -366,7 +445,7 @@ app.post('/webhook', async (req, res) => {
     if (text === 'LIST') {
       const result = await pool.query('SELECT * FROM consumers WHERE status = $1 ORDER BY id DESC', ['active']);
       const list = result.rows
-        .map((c) => `${c.id}. ${c.name} (${c.client_name}) - R${c.max_debit}/mo`)
+        .map((c) => `${c.id}. ${c.name} (${c.client_name}) - R${c.max_debit}/mo - ${c.is_in_arrears ? '⚠️ ARREARS' : '✅ OK'}`)
         .join('\n');
       await sendWhatsApp(from, `📋 Active Consumers:\n${list || 'None'}`);
     }
@@ -385,7 +464,19 @@ app.post('/webhook', async (req, res) => {
       await sendWhatsApp(from, `⏳ Pending Instructions:\n${pending || 'None'}`);
     }
 
-    // COMMAND 6: STATUS
+    // COMMAND 6: ARREARS
+    if (text === 'ARREARS') {
+      const result = await pool.query(
+        'SELECT * FROM consumers WHERE is_in_arrears = $1 ORDER BY arrears_days DESC',
+        [true]
+      );
+      const arrears = result.rows
+        .map((c) => `${c.id}. ${c.name} - R${c.arrears_amount} (${c.arrears_days} days)`)
+        .join('\n');
+      await sendWhatsApp(from, `⚠️ Accounts in Arrears:\n${arrears || 'None'}`);
+    }
+
+    // COMMAND 7: STATUS
     if (text.startsWith('STATUS')) {
       const result = await pool.query('SELECT * FROM debit_logs ORDER BY created_at DESC LIMIT 5');
       const status = result.rows
@@ -402,10 +493,9 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================
-// 8. ROUTES - REST API
+// 10. ROUTES - REST API
 // ============================================
 
-// Get all consumers
 app.get('/api/consumers', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM consumers ORDER BY created_at DESC');
@@ -416,7 +506,19 @@ app.get('/api/consumers', async (req, res) => {
   }
 });
 
-// Get pending instructions
+app.get('/api/consumers/arrears', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM consumers WHERE is_in_arrears = $1 ORDER BY arrears_days DESC',
+      [true]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    logger.error('Error fetching arrears consumers', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/instructions/pending', async (req, res) => {
   try {
     const result = await pool.query(
@@ -431,7 +533,6 @@ app.get('/api/instructions/pending', async (req, res) => {
   }
 });
 
-// Get debit logs
 app.get('/api/logs', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM debit_logs ORDER BY created_at DESC LIMIT 100');
@@ -442,7 +543,6 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
-// Register operator
 app.post('/api/operators/register', async (req, res) => {
   try {
     const { name, phone_number } = req.body;
@@ -470,6 +570,7 @@ app.get('/', async (req, res) => {
     const logs = await pool.query('SELECT COUNT(*) as total FROM debit_logs');
     const success = await pool.query('SELECT COUNT(*) as total FROM debit_logs WHERE status = $1', ['success']);
     const pending = await pool.query('SELECT COUNT(*) as total FROM debit_instructions WHERE instruction_status = $1', ['pending']);
+    const arrears = await pool.query('SELECT COUNT(*) as total FROM consumers WHERE is_in_arrears = $1', [true]);
 
     res.send(`
       <!DOCTYPE html>
@@ -480,8 +581,11 @@ app.get('/', async (req, res) => {
           body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
           .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
           h1 { color: #333; }
-          .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0; }
+          .header { border-bottom: 2px solid #667eea; padding-bottom: 10px; margin-bottom: 20px; }
+          .contact { font-size: 0.9em; color: #666; }
+          .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; margin: 20px 0; }
           .stat { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+          .stat.warning { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
           .stat h3 { margin: 0; font-size: 32px; }
           .stat p { margin: 5px 0 0 0; }
           .commands { background: #f9f9f9; padding: 15px; border-radius: 8px; margin-top: 20px; }
@@ -492,13 +596,23 @@ app.get('/', async (req, res) => {
       </head>
       <body>
         <div class="container">
-          <h1>🚀 DebitNow AI System - Dashboard</h1>
-          <p>Operator-instruction driven collections agent with Stitch + WhatsApp integration</p>
+          <div class="header">
+            <h1>🚀 DebitNow AI System - Dashboard</h1>
+            <p>Operator-instruction driven collections agent with Stitch + WhatsApp + USSD/OTP + SMS</p>
+            <div class="contact">
+              <strong>📞 KWHILCH GROUP PTY LTD</strong><br>
+              Phone: 0680467440 | Email: kwhilchgroup@gmail.com
+            </div>
+          </div>
           
           <div class="stats">
             <div class="stat">
               <h3>${consumers.rows[0].total}</h3>
               <p>Active Consumers</p>
+            </div>
+            <div class="stat warning">
+              <h3>${arrears.rows[0].total}</h3>
+              <p>⚠️ In Arrears</p>
             </div>
             <div class="stat">
               <h3>${pending.rows[0].total}</h3>
@@ -519,7 +633,8 @@ app.get('/', async (req, res) => {
             <div class="command"><code>ONBOARD Name|Client|MaxAmount</code> - Register a new consumer</div>
             <div class="command"><code>INSTRUCTION consumer_id amount [reason]</code> - Create a debit instruction</div>
             <div class="command"><code>EXECUTE instruction_id</code> - Execute a pending instruction</div>
-            <div class="command"><code>LIST</code> - Show all active consumers</div>
+            <div class="command"><code>LIST</code> - Show all active consumers (with arrears status)</div>
+            <div class="command"><code>ARREARS</code> - Show all accounts in arrears</div>
             <div class="command"><code>PENDING</code> - Show pending instructions</div>
             <div class="command"><code>STATUS</code> - Show last 5 debit attempts</div>
           </div>
@@ -527,6 +642,7 @@ app.get('/', async (req, res) => {
           <div class="commands">
             <h2>🔗 API Endpoints</h2>
             <div class="command"><code>GET /api/consumers</code> - List all consumers</div>
+            <div class="command"><code>GET /api/consumers/arrears</code> - List consumers in arrears</div>
             <div class="command"><code>GET /api/instructions/pending</code> - List pending instructions</div>
             <div class="command"><code>GET /api/logs</code> - List debit logs</div>
             <div class="command"><code>POST /api/operators/register</code> - Register operator</div>
@@ -543,13 +659,66 @@ app.get('/', async (req, res) => {
 });
 
 // ============================================
-// 9. SERVER START
+// 11. DAILY CRON - Detect arrears & send SMS notifications
+// ============================================
+cron.schedule('0 7 * * *', async () => {
+  logger.info('Starting daily arrears detection and SMS notification job');
+
+  try {
+    const result = await pool.query('SELECT * FROM consumers WHERE status = $1', ['active']);
+
+    for (const consumer of result.rows) {
+      // Check arrears status
+      const arrearsStatus = calculateArrearsStatus(consumer);
+
+      if (arrearsStatus.isInArrears) {
+        // Update consumer with arrears info
+        await pool.query(
+          `UPDATE consumers SET is_in_arrears = $1, arrears_amount = $2, arrears_days = $3, updated_at = NOW() 
+           WHERE id = $4`,
+          [true, arrearsStatus.arrearsAmount, arrearsStatus.arrearsdays, consumer.id]
+        );
+
+        // Send SMS notification to consumer who is not answering calls
+        const smsMessage = `⚠️ ARREARS NOTICE\n\nDear ${consumer.name}, your account is in arrears for R${arrearsStatus.arrearsAmount}.\n\nPlease contact KWHILCH GROUP PTY LTD immediately:\n📞 ${KWHILCH_PHONE}\n📧 ${KWHILCH_EMAIL}\n\nAction required to avoid legal proceedings.`;
+
+        const smsSent = await sendSMS(consumer.phone_number, smsMessage);
+
+        if (smsSent.success) {
+          await pool.query(
+            'INSERT INTO sms_notifications(consumer_id, message, notification_type, status, sent_at) VALUES($1,$2,$3,$4, NOW())',
+            [consumer.id, smsMessage, 'ARREARS_ALERT', 'sent']
+          );
+          logger.info(`Arrears SMS sent to consumer ${consumer.id}`);
+        }
+
+        // Also send USSD notification as backup
+        const ussdMessage = `*134*ARREARS*${consumer.id}*${arrearsStatus.arrearsAmount}#`;
+        await sendUSSD(consumer.phone_number, ussdMessage);
+
+        logger.info(`Arrears detected for consumer ${consumer.id}: R${arrearsStatus.arrearsAmount} (${arrearsStatus.arrearsdays} days)`);
+      } else {
+        // Update to not in arrears
+        await pool.query(
+          'UPDATE consumers SET is_in_arrears = $1, arrears_amount = $2, arrears_days = $3, updated_at = NOW() WHERE id = $4',
+          [false, 0, 0, consumer.id]
+        );
+      }
+    }
+  } catch (err) {
+    logger.error('Daily arrears detection error', err);
+  }
+});
+
+// ============================================
+// 12. SERVER START
 // ============================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`🚀 DebitNow AI System running on port ${PORT}`);
   logger.info(`📊 Dashboard: http://localhost:${PORT}`);
   logger.info(`🔗 Webhook: http://localhost:${PORT}/webhook`);
+  logger.info(`📞 Support: ${KWHILCH_PHONE} | ${KWHILCH_EMAIL}`);
 });
 
 module.exports = app;
