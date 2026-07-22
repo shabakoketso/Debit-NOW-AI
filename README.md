@@ -2,6 +2,14 @@
 
 **AI-powered collections agent** that monitors overdue accounts, decides optimal debit timing, and executes instant collections via Stitch + WhatsApp.
 
+## 👤 Creator
+
+**Isaac Koketso Shaba**  
+Founder & CEO  
+**KWHILCH GROUP PTY LTD**
+
+---
+
 ## What It Does
 
 1. **AI Orchestrator** → Decides who to debit, when, how much, and via which channel
@@ -113,33 +121,33 @@ Every day at **8:00 AM**, the system:
 
 ```
 ┌─────────────────────────────────────────────┐
-│         WhatsApp / REST API / Cron          │
-└──────────────────┬──────────────────────────┘
-                   │
-        ┌──────────▼───────────┐
-        │  AI Decision Engine  │  (shouldDebit)
-        │  - Balance check     │
-        │  - Time/Day check    │
-        │  - Risk scoring      │
-        └──────────┬───────────┘
-                   │
-        ┌──────────▼───────────┐
-        │  Debit Executor      │  (debitViaStitch)
-        │  - Stitch API call   │
-        │  - Transaction log   │
-        └──────────┬───────────┘
-                   │
-        ┌──────────▼───────────┐
-        │  Communications      │  (sendWhatsApp)
-        │  - WhatsApp notify   │
-        │  - Receipt / status  │
-        └──────────────────────┘
-                   │
-        ┌──────────▼───────────┐
-        │    PostgreSQL DB     │
-        │  - Consumers table   │
-        │  - Debit logs table  │
-        └──────────────────────┘
+│     WhatsApp / REST API / Cron              │
+└─────────────────────┬───────────────────────┘
+                      │
+        ┌─────────────┴──────────────┐
+        │ AI Decision Engine         │
+        │ - Balance check            │
+        │ - Time/Day check           │
+        │ - Risk scoring             │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────┴──────────────┐
+        │ Debit Executor             │
+        │ - Stitch API call          │
+        │ - Transaction log          │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────┴──────────────┐
+        │ Communications             │
+        │ - WhatsApp notify          │
+        │ - Receipt / status         │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────┴──────────────┐
+        │    PostgreSQL DB           │
+        │  - Consumers table         │
+        │  - Debit logs table        │
+        └────────────────────────────┘
 ```
 
 ## Database Schema
@@ -217,3 +225,7 @@ DATABASE_URL=postgresql://user:password@localhost:5432/debit_now_ai
 ## License
 
 MIT
+
+---
+
+**Built by Isaac Koketso Shaba @ KWHILCH GROUP PTY LTD**
