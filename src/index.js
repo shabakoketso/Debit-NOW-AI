@@ -1,10 +1,9 @@
 // DEBIT NOW AI - MVP
-// Combines: Stitch Sandbox + Meta WhatsApp + AI Decision Logic + Daily Cron
+// Combines: Stitch Sandbox + Meta WhatsApp + AI Decision Logic + Operator Instructions
 
 const express = require('express');
 const axios = require('axios');
 const { Pool } = require('pg');
-const cron = require('node-cron');
 const logger = require('./utils/logger');
 require('dotenv').config();
 
@@ -39,13 +38,38 @@ async function initDatabase() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS debit_instructions (
+        id SERIAL PRIMARY KEY,
+        consumer_id INTEGER REFERENCES consumers(id),
+        amount NUMERIC NOT NULL,
+        reason TEXT,
+        instruction_status TEXT DEFAULT 'pending',
+        operator_id TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        executed_at TIMESTAMP,
+        executed_by_system TEXT
+      );
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS debit_logs (
         id SERIAL PRIMARY KEY,
         consumer_id INTEGER REFERENCES consumers(id),
+        instruction_id INTEGER REFERENCES debit_instructions(id),
         amount NUMERIC,
         status TEXT,
         ai_decision TEXT,
         reason TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS operators (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone_number TEXT UNIQUE,
+        status TEXT DEFAULT 'active',
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
@@ -68,10 +92,31 @@ const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'debitnow123';
 
 // ============================================
-// 3. AI DECISION ENGINE
+// 3. AI DECISION ENGINE - Validates operator instructions
 // ============================================
+function validateDebitInstruction(consumer, amount, instruction) {
+  // Validates that an operator instruction exists and is pending execution
+  
+  const checks = {
+    instructionExists: !!instruction,
+    instructionPending: instruction?.instruction_status === 'pending',
+    amountMatches: instruction?.amount === amount,
+    amountWithinLimit: amount <= consumer.max_debit,
+    isPositiveAmount: amount > 0,
+  };
+
+  const passed = Object.values(checks).filter(Boolean).length;
+  const decision = passed >= 4; // Need 4+ checks to pass
+
+  return {
+    decision,
+    reason: `Operator instruction validation: ${Object.values(checks).filter(Boolean).length}/5 checks passed`,
+    checks,
+  };
+}
+
 function shouldDebit(consumer, amount) {
-  // Fake AI logic for MVP
+  // Fake AI logic for MVP - balance & timing checks
   // In production: Connect to LLM (OpenAI/Claude) + your collections DB
   
   const today = new Date().getDay();
@@ -187,6 +232,14 @@ app.post('/webhook', async (req, res) => {
 
     logger.info(`WhatsApp message from ${from}: ${text}`);
 
+    // Check if operator exists
+    const operatorCheck = await pool.query('SELECT * FROM operators WHERE phone_number = $1', [from]);
+    if (operatorCheck.rows.length === 0) {
+      await sendWhatsApp(from, '❌ You are not registered as an operator. Contact admin.');
+      return res.sendStatus(200);
+    }
+    const operator = operatorCheck.rows[0];
+
     // COMMAND 1: ONBOARD Name|Client|800
     if (text.startsWith('ONBOARD')) {
       const parts = text.split(' ').slice(1).join(' ').split('|');
@@ -203,71 +256,140 @@ app.post('/webhook', async (req, res) => {
         [name, client, from, fake_account_id, parseFloat(max_debit)]
       );
 
-      await sendWhatsApp(from, `✅ Onboarded ${name} for ${client}. Max debit R${max_debit}. I will monitor daily and debit when conditions are optimal.`);
+      await sendWhatsApp(from, `✅ Onboarded ${name} for ${client}. Max debit R${max_debit}. Consumer ready for debit instructions.`);
     }
 
-    // COMMAND 2: DEBIT 1 500
-    if (text.startsWith('DEBIT')) {
-      const [, id, amount] = text.split(' ');
-      if (!id || !amount) {
-        await sendWhatsApp(from, '❌ Format: DEBIT consumer_id amount\nExample: DEBIT 1 500');
+    // COMMAND 2: INSTRUCTION consumer_id amount [reason]
+    // Operator creates a debit instruction
+    if (text.startsWith('INSTRUCTION')) {
+      const parts = text.split(' ');
+      const [, consumer_id, amount, ...reasonParts] = parts;
+      const reason = reasonParts.join(' ') || 'Operator instruction';
+
+      if (!consumer_id || !amount) {
+        await sendWhatsApp(from, '❌ Format: INSTRUCTION consumer_id amount [reason]\nExample: INSTRUCTION 1 500 Payment collection');
         return res.sendStatus(200);
       }
 
-      const result = await pool.query('SELECT * FROM consumers WHERE id = $1', [parseInt(id)]);
+      const result = await pool.query('SELECT * FROM consumers WHERE id = $1', [parseInt(consumer_id)]);
       const consumer = result.rows[0];
 
       if (!consumer) {
-        await sendWhatsApp(from, `❌ Consumer ID ${id} not found`);
+        await sendWhatsApp(from, `❌ Consumer ID ${consumer_id} not found`);
         return res.sendStatus(200);
       }
 
-      const ai = shouldDebit(consumer, parseFloat(amount));
       const numAmount = parseFloat(amount);
+      if (numAmount > consumer.max_debit) {
+        await sendWhatsApp(from, `❌ Amount R${numAmount} exceeds max debit R${consumer.max_debit}`);
+        return res.sendStatus(200);
+      }
+
+      // Create instruction
+      const instructionResult = await pool.query(
+        'INSERT INTO debit_instructions(consumer_id, amount, reason, operator_id, instruction_status) VALUES($1,$2,$3,$4,$5) RETURNING *',
+        [consumer.id, numAmount, reason, operator.id, 'pending']
+      );
+      const instruction = instructionResult.rows[0];
+
+      await sendWhatsApp(from, `📋 Debit instruction created\nID: ${instruction.id}\nConsumer: ${consumer.name}\nAmount: R${numAmount}\nReason: ${reason}\n\nWill execute when conditions are optimal.`);
+      logger.info(`Instruction ${instruction.id} created by operator ${operator.id}`);
+    }
+
+    // COMMAND 3: EXECUTE instruction_id
+    // Operator manually triggers execution of a specific instruction
+    if (text.startsWith('EXECUTE')) {
+      const [, instruction_id] = text.split(' ');
+
+      if (!instruction_id) {
+        await sendWhatsApp(from, '❌ Format: EXECUTE instruction_id\nExample: EXECUTE 5');
+        return res.sendStatus(200);
+      }
+
+      const instrResult = await pool.query(
+        'SELECT * FROM debit_instructions WHERE id = $1 AND instruction_status = $2',
+        [parseInt(instruction_id), 'pending']
+      );
+
+      if (instrResult.rows.length === 0) {
+        await sendWhatsApp(from, `❌ Instruction ${instruction_id} not found or already executed`);
+        return res.sendStatus(200);
+      }
+
+      const instruction = instrResult.rows[0];
+      const consumerResult = await pool.query('SELECT * FROM consumers WHERE id = $1', [instruction.consumer_id]);
+      const consumer = consumerResult.rows[0];
+
+      // Validate instruction
+      const validation = validateDebitInstruction(consumer, instruction.amount, instruction);
+
+      if (!validation.decision) {
+        await sendWhatsApp(from, `❌ Instruction validation failed: ${validation.reason}`);
+        return res.sendStatus(200);
+      }
+
+      // Check AI conditions (balance, time, etc)
+      const ai = shouldDebit(consumer, instruction.amount);
 
       if (!ai.decision) {
-        await pool.query(
-          'INSERT INTO debit_logs(consumer_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5)',
-          [consumer.id, numAmount, 'skipped', 'AI_REJECTED', ai.reason]
-        );
-        await sendWhatsApp(from, `⏭️ Debit skipped for ${consumer.name}. Reason: ${ai.reason}`);
+        await sendWhatsApp(from, `⏭️ AI conditions not optimal for ${consumer.name}. Reason: ${ai.reason}`);
         return res.sendStatus(200);
       }
 
       // Execute debit
-      const stitch = await debitViaStitch(consumer, numAmount);
+      const stitch = await debitViaStitch(consumer, instruction.amount);
 
       if (stitch.success) {
+        // Update instruction to executed
         await pool.query(
-          'INSERT INTO debit_logs(consumer_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5)',
-          [consumer.id, numAmount, 'success', 'AI_APPROVED', ai.reason]
+          'UPDATE debit_instructions SET instruction_status = $1, executed_at = NOW(), executed_by_system = $2 WHERE id = $3',
+          ['executed', operator.id, instruction.id]
         );
+
+        // Log debit
+        await pool.query(
+          'INSERT INTO debit_logs(consumer_id, instruction_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5,$6)',
+          [consumer.id, instruction.id, instruction.amount, 'success', 'OPERATOR_INSTRUCTION', instruction.reason]
+        );
+
         await pool.query('UPDATE consumers SET last_debit_attempt = NOW() WHERE id = $1', [consumer.id]);
 
-        await sendWhatsApp(from, `✅ DEBIT SUCCESS\nAmount: R${numAmount}\nFrom: ${consumer.name}\nClient: ${consumer.client_name}\nReason: ${ai.reason}\nTxn: ${stitch.transaction_id}`);
+        await sendWhatsApp(from, `✅ DEBIT EXECUTED\nAmount: R${instruction.amount}\nFrom: ${consumer.name}\nClient: ${consumer.client_name}\nReason: ${instruction.reason}\nTxn: ${stitch.transaction_id}`);
+        logger.info(`Instruction ${instruction.id} executed successfully by operator ${operator.id}`);
       } else {
-        await pool.query(
-          'INSERT INTO debit_logs(consumer_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5)',
-          [consumer.id, numAmount, 'failed', 'STITCH_ERROR', stitch.error]
-        );
-        await sendWhatsApp(from, `❌ Debit failed: ${stitch.error}`);
+        await sendWhatsApp(from, `❌ Debit execution failed: ${stitch.error}`);
+        logger.error(`Instruction ${instruction.id} execution failed: ${stitch.error}`);
       }
     }
 
-    // COMMAND 3: LIST
+    // COMMAND 4: LIST
     if (text === 'LIST') {
-      const result = await pool.query('SELECT * FROM consumers WHERE status = \'active\'');
+      const result = await pool.query('SELECT * FROM consumers WHERE status = $1 ORDER BY id DESC', ['active']);
       const list = result.rows
         .map((c) => `${c.id}. ${c.name} (${c.client_name}) - R${c.max_debit}/mo`)
         .join('\n');
       await sendWhatsApp(from, `📋 Active Consumers:\n${list || 'None'}`);
     }
 
-    // COMMAND 4: STATUS
+    // COMMAND 5: PENDING
+    if (text === 'PENDING') {
+      const result = await pool.query(
+        `SELECT di.*, c.name, c.client_name FROM debit_instructions di 
+         JOIN consumers c ON di.consumer_id = c.id 
+         WHERE di.instruction_status = $1 ORDER BY di.created_at DESC LIMIT 10`,
+        ['pending']
+      );
+      const pending = result.rows
+        .map((p) => `ID ${p.id}: ${p.name} - R${p.amount} (${p.reason})`)
+        .join('\n');
+      await sendWhatsApp(from, `⏳ Pending Instructions:\n${pending || 'None'}`);
+    }
+
+    // COMMAND 6: STATUS
     if (text.startsWith('STATUS')) {
       const result = await pool.query('SELECT * FROM debit_logs ORDER BY created_at DESC LIMIT 5');
       const status = result.rows
-        .map((log) => `ID ${log.consumer_id}: R${log.amount} - ${log.status}`)
+        .map((log) => `ID ${log.id}: Consumer ${log.consumer_id} - R${log.amount} - ${log.status}`)
         .join('\n');
       await sendWhatsApp(from, `📊 Last 5 Debits:\n${status || 'None'}`);
     }
@@ -294,6 +416,21 @@ app.get('/api/consumers', async (req, res) => {
   }
 });
 
+// Get pending instructions
+app.get('/api/instructions/pending', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT di.*, c.name as consumer_name, c.client_name FROM debit_instructions di 
+       JOIN consumers c ON di.consumer_id = c.id 
+       WHERE di.instruction_status = 'pending' ORDER BY di.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    logger.error('Error fetching pending instructions', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get debit logs
 app.get('/api/logs', async (req, res) => {
   try {
@@ -305,23 +442,45 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
+// Register operator
+app.post('/api/operators/register', async (req, res) => {
+  try {
+    const { name, phone_number } = req.body;
+
+    if (!name || !phone_number) {
+      return res.status(400).json({ error: 'Name and phone_number required' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO operators(name, phone_number) VALUES($1,$2) RETURNING *',
+      [name, phone_number]
+    );
+
+    res.json({ message: 'Operator registered', operator: result.rows[0] });
+  } catch (err) {
+    logger.error('Error registering operator', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Dashboard
 app.get('/', async (req, res) => {
   try {
-    const consumers = await pool.query('SELECT COUNT(*) as total FROM consumers WHERE status = \'active\'');
+    const consumers = await pool.query('SELECT COUNT(*) as total FROM consumers WHERE status = $1', ['active']);
     const logs = await pool.query('SELECT COUNT(*) as total FROM debit_logs');
-    const success = await pool.query('SELECT COUNT(*) as total FROM debit_logs WHERE status = \'success\'');
+    const success = await pool.query('SELECT COUNT(*) as total FROM debit_logs WHERE status = $1', ['success']);
+    const pending = await pool.query('SELECT COUNT(*) as total FROM debit_instructions WHERE instruction_status = $1', ['pending']);
 
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Debit Now AI - Dashboard</title>
+        <title>DebitNow AI System - Dashboard</title>
         <style>
           body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
           .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
           h1 { color: #333; }
-          .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 20px 0; }
+          .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0; }
           .stat { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
           .stat h3 { margin: 0; font-size: 32px; }
           .stat p { margin: 5px 0 0 0; }
@@ -333,13 +492,17 @@ app.get('/', async (req, res) => {
       </head>
       <body>
         <div class="container">
-          <h1>🚀 Debit Now AI - Dashboard</h1>
-          <p>AI-powered collections agent with Stitch + WhatsApp integration</p>
+          <h1>🚀 DebitNow AI System - Dashboard</h1>
+          <p>Operator-instruction driven collections agent with Stitch + WhatsApp integration</p>
           
           <div class="stats">
             <div class="stat">
               <h3>${consumers.rows[0].total}</h3>
               <p>Active Consumers</p>
+            </div>
+            <div class="stat">
+              <h3>${pending.rows[0].total}</h3>
+              <p>Pending Instructions</p>
             </div>
             <div class="stat">
               <h3>${logs.rows[0].total}</h3>
@@ -352,17 +515,21 @@ app.get('/', async (req, res) => {
           </div>
 
           <div class="commands">
-            <h2>📱 WhatsApp Commands</h2>
+            <h2>📱 WhatsApp Commands (Operators Only)</h2>
             <div class="command"><code>ONBOARD Name|Client|MaxAmount</code> - Register a new consumer</div>
-            <div class="command"><code>DEBIT id amount</code> - Trigger AI debit decision</div>
+            <div class="command"><code>INSTRUCTION consumer_id amount [reason]</code> - Create a debit instruction</div>
+            <div class="command"><code>EXECUTE instruction_id</code> - Execute a pending instruction</div>
             <div class="command"><code>LIST</code> - Show all active consumers</div>
+            <div class="command"><code>PENDING</code> - Show pending instructions</div>
             <div class="command"><code>STATUS</code> - Show last 5 debit attempts</div>
           </div>
 
           <div class="commands">
             <h2>🔗 API Endpoints</h2>
             <div class="command"><code>GET /api/consumers</code> - List all consumers</div>
+            <div class="command"><code>GET /api/instructions/pending</code> - List pending instructions</div>
             <div class="command"><code>GET /api/logs</code> - List debit logs</div>
+            <div class="command"><code>POST /api/operators/register</code> - Register operator</div>
             <div class="command"><code>POST /webhook</code> - WhatsApp webhook</div>
           </div>
         </div>
@@ -376,50 +543,11 @@ app.get('/', async (req, res) => {
 });
 
 // ============================================
-// 9. DAILY AI CRON - Auto-check all consumers
-// ============================================
-cron.schedule('0 8 * * *', async () => {
-  logger.info('Starting daily AI debit check');
-
-  try {
-    const result = await pool.query(
-      'SELECT * FROM consumers WHERE status = \'active\' AND (last_debit_attempt IS NULL OR last_debit_attempt < NOW() - INTERVAL \'1 day\')'
-    );
-
-    for (const consumer of result.rows) {
-      const ai = shouldDebit(consumer, consumer.max_debit * 0.5); // Try 50% of max
-
-      if (ai.decision) {
-        const stitch = await debitViaStitch(consumer, consumer.max_debit * 0.5);
-
-        if (stitch.success) {
-          await pool.query(
-            'INSERT INTO debit_logs(consumer_id, amount, status, ai_decision, reason) VALUES($1,$2,$3,$4,$5)',
-            [consumer.id, consumer.max_debit * 0.5, 'success', 'CRON_APPROVED', ai.reason]
-          );
-          await pool.query('UPDATE consumers SET last_debit_attempt = NOW() WHERE id = $1', [consumer.id]);
-
-          if (consumer.phone_number) {
-            await sendWhatsApp(
-              consumer.phone_number,
-              `✅ AI Auto-Debit Successful\nAmount: R${(consumer.max_debit * 0.5).toFixed(2)}\nReason: ${ai.reason}`
-            );
-          }
-          logger.info(`Auto-debit successful for consumer ${consumer.id}`);
-        }
-      }
-    }
-  } catch (err) {
-    logger.error('Daily AI cron error', err);
-  }
-});
-
-// ============================================
-// 10. SERVER START
+// 9. SERVER START
 // ============================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  logger.info(`🚀 Debit Now AI running on port ${PORT}`);
+  logger.info(`🚀 DebitNow AI System running on port ${PORT}`);
   logger.info(`📊 Dashboard: http://localhost:${PORT}`);
   logger.info(`🔗 Webhook: http://localhost:${PORT}/webhook`);
 });
