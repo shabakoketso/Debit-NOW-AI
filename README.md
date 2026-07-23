@@ -331,3 +331,4 @@ MIT
 
 **Built by Isaac Koketso Shaba @ KWHILCH GROUP PTY LTD**  
 📧 kwhilchgroup@gmail.com | 📞 0680467440
+- **Create Dashboard for Debit NOW AI System that has the Functionality to show accounts, contact information, Products,Partnerships, Newsletter, Company Information and others**
