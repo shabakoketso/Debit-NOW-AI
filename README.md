@@ -53,6 +53,8 @@ Founder & CEO
    ```
 
 4. **View Dashboard**
+
+**index.js**
    - const express = require("express");
 const axios = require("axios");
 const { Pool } = require("pg");
