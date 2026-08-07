@@ -677,17 +677,14 @@ cron.schedule('0 7 * * *', async () => {
   try {
     const result = await pool.query('SELECT * FROM consumers WHERE status = $1', ['active']);
 
-    for (const consumer of result.rows) {
+  
       // Check arrears status
       const arrearsStatus = calculateArrearsStatus(consumer);
 
       if (arrearsStatus.isInArrears) {
         // Update consumer with arrears info
         await pool.query(
-          `UPDATE consumers SET is_in_arrears = $1, arrears_amount = $2, arrears_days = $3, updated_at = NOW() 
-           WHERE id = $4`,
-          [true, arrearsStatus.arrearsAmount, arrearsStatus.arrearsdays, consumer.id]
-        );
+          `await pool.query('UPDATE debit_instructions SET instruction_status = $1, collected_amount = $2, channel = $3, executed_at = NOW(), executed_by_system = $4 WHERE id = $5', ['success', instruction.amount, 'whatsapp', operator.id, instruction.id]);
 
         // Send SMS notification to consumer who is not answering calls
         const smsMessage = `⚠️ ARREARS NOTICE\n\nDear ${consumer.name}, your account is in arrears for R${arrearsStatus.arrearsAmount}.\n\nPlease contact KWHILCH GROUP PTY LTD immediately:\n📞 ${KWHILCH_PHONE}\n📧 ${KWHILCH_EMAIL}\n\nAction required to avoid legal proceedings.`;
@@ -725,6 +722,25 @@ cron.schedule('0 7 * * *', async () => {
 // ============================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+     // DASHBOARD KPIs
+    app.get('/api/dashboard/summary', async (req, res) => {
+      try {
+        const total = await pool.query(`SELECT COALESCE(SUM(amount),0) as total FROM debit_instructions`);
+        const collected = await pool.query(`SELECT COALESCE(SUM(collected_amount),0) as collected FROM debit_instructions WHERE instruction_status='success'`);
+        const totalVal = parseFloat(total.rows[0].total); const collectedVal = parseFloat(collected.rows[0].collected);
+        const rate = totalVal > 0? (collectedVal / totalVal) * 100 : 0;
+        const avg = await pool.query(`SELECT COALESCE(AVG(cnt),0) as avg FROM (SELECT COUNT(DISTINCT consumer_id) as cnt FROM debit_instructions WHERE created_at >= NOW() - INTERVAL '30 days' GROUP BY DATE(created_at)) t`);
+        const arrearsCount = await pool.query(`SELECT COUNT(*) FROM consumers WHERE is_in_arrears = true`);
+        const totalConsumers = await pool.query(`SELECT COUNT(*) FROM consumers`);
+        res.json({ collection_rate_pct: parseFloat(rate.toFixed(1)), collected_month: collectedVal, avg_clients_per_day: Math.round(parseFloat(avg.rows[0].avg)), arrears_pct: totalConsumers.rows[0].count > 0? parseFloat(((arrearsCount.rows[0].count / totalConsumers.rows[0].count) * 100).toFixed(1)) : 0, pending_instructions: await pool.query(`SELECT COUNT(*) FROM debit_instructions WHERE instruction_status='pending'`).then(r=>r.rows[0].count) })
+      } catch (err) { res.status(500).json({ error: err.message }); }
+    });
+
+    // CLICK TO EXECUTE
+    app.post('/api/instructions/:id/execute', async (req, res) => {
+      try { await pool.query('UPDATE debit_instructions SET instruction_status = $1, collected_amount = amount, channel = $2, executed_at = NOW() WHERE id = $3 AND instruction_status = $4', ['success', 'dashboard', req.params.id, 'pending']); res.json({ success: true }); }
+      catch (err) { res.status(500).json({ error: err.message }); }
+    }); 
   logger.info(`🚀 DebitNow AI System running on port ${PORT}`);
   logger.info(`📊 Dashboard: http://localhost:${PORT}`);
   logger.info(`🔗 Webhook: http://localhost:${PORT}/webhook`);
@@ -732,3 +748,5 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+    const cors = require('cors');
+    app.use(cors());
