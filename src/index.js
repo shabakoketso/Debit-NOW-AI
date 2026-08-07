@@ -21,6 +21,16 @@ const pool = new Pool({
 pool.on('error', (err) => logger.error('Pool error', err));
 
 // Initialize database tables
+initDatabase();
+// AUTO MIGRATION - adds new columns on startup
+async function runMigrations() {
+  try {
+    await pool.query(`ALTER TABLE debit_instructions ADD COLUMN IF NOT EXISTS collected_amount NUMERIC DEFAULT 0`);
+    await pool.query(`ALTER TABLE debit_instructions ADD COLUMN IF NOT EXISTS channel TEXT DEFAULT 'whatsapp'`);
+    logger.info('Migration complete: added collected_amount + channel');
+  } catch(err) { logger.error('Migration error', err) }
+}
+runMigrations();
 async function initDatabase() {
   try {
     await pool.query(`
