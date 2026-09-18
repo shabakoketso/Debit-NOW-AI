@@ -7,9 +7,10 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "jest --runInBand",
-    "test:syntax": "node --check index.js && node --check Gfile/index.js && node --check src/utils/logger.js"
+    "test:syntax": "node --check index.js && node --check Gfile/index.js && node --check src/utils/logger.js",
+    "weather:start": "node weather-dashboard/server.js"
   },
-  "keywords": ["ai", "collections", "debit-now", "whatsapp", "sms", "otp", "payments"],
+  "keywords": ["ai", "collections", "debit-now", "whatsapp", "sms", "otp", "payments", "weather"],
   "author": "Isaac Koketso Shaba",
   "license": "MIT",
   "dependencies": {

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A responsive weather dashboard powered by Open-Meteo.">
+  <title>Weather dashboard</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07111f; --card:#10233b; --muted:#9bb0c8; --accent:#64d8ff; --line:#23415f; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; font:16px/1.5 system-ui,sans-serif; color:#eef7ff; background:linear-gradient(145deg,#07111f,#12365a); }
+    main { width:min(1120px,92%); margin:auto; padding:42px 0 60px; }
+    header { display:flex; justify-content:space-between; gap:24px; align-items:end; margin-bottom:26px; }
+    h1,h2,h3,p { margin-top:0; } h1 { margin-bottom:8px; font-size:clamp(2rem,5vw,4rem); line-height:1; } h2 { margin-bottom:16px; } .muted { color:var(--muted); }
+    .search { display:flex; gap:10px; margin:24px 0 14px; } input,button { border:1px solid var(--line); border-radius:12px; padding:13px 15px; font:inherit; } input { flex:1; color:white; background:#08192b; } button { cursor:pointer; color:#04121e; background:var(--accent); font-weight:700; } button.secondary { color:white; background:transparent; }
+    #suggestions { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:24px; } #suggestions button { color:#dff7ff; background:#163654; padding:9px 12px; }
+    .panel { padding:22px; border:1px solid var(--line); border-radius:20px; background:rgba(16,35,59,.9); box-shadow:0 12px 36px #02091444; }
+    .current { display:grid; grid-template-columns:1.3fr 1fr; gap:24px; align-items:center; } .temp { font-size:clamp(3.4rem,9vw,7rem); line-height:1; font-weight:800; } .condition { font-size:1.3rem; color:var(--accent); } .facts { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; } .fact { padding:14px; border-radius:14px; background:#0a1a2c; } .fact strong { display:block; font-size:1.2rem; }
+    .forecast { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin-top:18px; } .day { padding:15px 10px; text-align:center; border:1px solid var(--line); border-radius:15px; background:#0b1c30; } .day .icon { font-size:1.8rem; margin:7px 0; } .day small { display:block; color:var(--muted); } .error { color:#ffb4a9; margin:12px 0; } .loading { color:var(--accent); }
+    @media (max-width:760px) { header,.current { display:block; } header .muted { margin-top:12px; } .facts { margin-top:20px; } .forecast { grid-template-columns:repeat(2,1fr); } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><p class="muted">Open-Meteo weather service</p><h1>Weather, at a glance.</h1><p id="location" class="muted">Search for a city or use your location.</p></div><button id="locate" class="secondary">Use my location</button></header>
+  <form id="search-form" class="search"><input id="query" required minlength="2" placeholder="Search city, e.g. Johannesburg" aria-label="Search city"><button>Search</button></form>
+  <div id="suggestions" aria-live="polite"></div><p id="message" role="status"></p>
+  <section id="weather" hidden>
+    <div class="panel current"><div><div id="current-temp" class="temp"></div><div id="current-condition" class="condition"></div><p id="updated" class="muted"></p></div><div class="facts"><div class="fact">Feels like<strong id="feels"></strong></div><div class="fact">Humidity<strong id="humidity"></strong></div><div class="fact">Wind<strong id="wind"></strong></div><div class="fact">Rain chance<strong id="rain"></strong></div></div></div>
+    <div class="panel" style="margin-top:18px"><h2>7-day forecast</h2><div id="forecast" class="forecast"></div></div>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const weatherText = {0:'Clear sky',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Rime fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',71:'Light snow',73:'Snow',75:'Heavy snow',80:'Rain showers',81:'Rain showers',82:'Heavy showers',95:'Thunderstorm',96:'Thunderstorm with hail',99:'Thunderstorm with hail'};
+  const icon = (code, day=1) => code >= 95 ? '⛈️' : code >= 80 ? '🌦️' : code >= 51 ? '🌧️' : code >= 45 ? '🌫️' : code >= 1 ? (day ? '⛅' : '☁️') : '☀️';
+  const setMessage = (text, type='') => { $('message').textContent=text; $('message').className=type; };
+  function render(data, place) {
+    const c=data.current, d=data.daily; $('weather').hidden=false; $('location').textContent=`${place.name}${place.admin1 ? ', '+place.admin1 : ''}, ${place.country}`;
+    $('current-temp').textContent=`${Math.round(c.temperature_2m)}°C`; $('current-condition').textContent=`${weatherText[c.weather_code] || 'Current conditions'} ${icon(c.weather_code,c.is_day)}`; $('updated').textContent=`Updated ${new Date(c.time).toLocaleString([], {weekday:'short',hour:'2-digit',minute:'2-digit'})}`;
+    $('feels').textContent=`${Math.round(c.apparent_temperature)}°C`; $('humidity').textContent=`${c.relative_humidity_2m}%`; $('wind').textContent=`${Math.round(c.wind_speed_10m)} km/h`; $('rain').textContent=`${d.precipitation_probability_max[0] ?? 0}%`;
+    $('forecast').innerHTML=d.time.map((date,i)=>`<article class="day"><strong>${new Date(date+'T12:00:00').toLocaleDateString([], {weekday:'short'})}</strong><div class="icon">${icon(d.weather_code[i])}</div><b>${Math.round(d.temperature_2m_max[i])}°</b> / ${Math.round(d.temperature_2m_min[i])}°<small>${weatherText[d.weather_code[i]] || 'Conditions'}</small><small>☔ ${d.precipitation_probability_max[i] ?? 0}%</small></article>`).join('');
+  }
+  async function load(place) { setMessage('Loading forecast…','loading'); try { const r=await fetch(`/api/weather/forecast?latitude=${place.latitude}&longitude=${place.longitude}&timezone=${encodeURIComponent(place.timezone || 'auto')}`); const data=await r.json(); if(!r.ok) throw new Error(data.error); render(data,place); setMessage(''); } catch(e) { setMessage(e.message || 'Unable to load weather.','error'); } }
+  $('search-form').addEventListener('submit', async e => { e.preventDefault(); setMessage('Searching…','loading'); try { const r=await fetch(`/api/weather/search?q=${encodeURIComponent($('query').value)}`); const data=await r.json(); if(!r.ok || !data.results?.length) throw new Error(data.error || 'No locations found.'); $('suggestions').innerHTML=data.results.map((p,i)=>`<button type="button" data-index="${i}">${p.name}, ${p.country}${p.admin1 ? ' · '+p.admin1 : ''}</button>`).join(''); window.places=data.results; setMessage('Choose a location:'); } catch(e) { setMessage(e.message,'error'); } });
+  $('suggestions').addEventListener('click', e => { if(e.target.dataset.index !== undefined) { const place=window.places[Number(e.target.dataset.index)]; $('suggestions').innerHTML=''; load(place); } });
+  $('locate').addEventListener('click', () => navigator.geolocation?.getCurrentPosition(p => load({name:'Your location',country:'',latitude:p.coords.latitude,longitude:p.coords.longitude}), () => setMessage('Location access was not available. Search for a city instead.','error')));
+</script>
+</body>
+</html>
