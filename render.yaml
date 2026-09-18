@@ -15,3 +15,14 @@ services:
         generateValue: true
       - key: VERIFY_TOKEN
         generateValue: true
+
+  - type: web
+    name: debit-now-todo
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run todo:start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
