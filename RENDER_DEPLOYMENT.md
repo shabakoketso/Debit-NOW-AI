@@ -1,35 +1,33 @@
 # Render deployment
 
-The unified Debit NOW service starts from the repository root with:
+The unified service uses the repository-root entrypoint:
 
 ```bash
 npm install
-npm start
+node index.js
 ```
 
-The application listens on Render's injected `PORT` value and serves the control dashboard at `/dashboard`.
+The dashboard is served at `/dashboard`.
 
-## Fixing an existing Render service
+## Existing Render service
 
-If Render logs show:
+For an existing Render service, the service-level setting takes precedence over `render.yaml`. In Render, open **Settings → Build & Deploy** and set:
 
 ```text
-Running 'node src/index.js'
-Cannot find module '/opt/render/project/src/src/index.js'
+Build Command: npm install
+Start Command: node index.js
 ```
 
-then the existing Render service has an incorrect **Start Command** override. In Render, open:
+Remove any command containing `src/index.js`. This repository intentionally has no required `src/index.js` entrypoint.
 
-**Service → Settings → Build & Deploy → Start Command**
+Then choose **Manual Deploy → Deploy latest commit**.
 
-Set it to:
+Required production environment variables:
 
-```bash
-npm start
-```
-
-Do not use `node src/index.js`; this repository's entrypoint is `index.js` in the repository root.
-
-Then save and select **Manual Deploy → Deploy latest commit**.
-
-The Blueprint file contains only the unified Debit NOW web service. The weather dashboard remains available for local use with `npm run weather:start` and should be deployed as a separate Render service only if required.
+- `DATABASE_URL`
+- `NODE_ENV=production`
+- `OTP_PEPPER`
+- `VERIFY_TOKEN`
+- `SMS_GATEWAY=mock` for safe sandbox testing
+- `OTP_VALID_MINUTES=5`
+- `OTP_MAX_ATTEMPTS=3`
