@@ -1,23 +1,15 @@
 {
   "name": "debit-now-ai",
-  "version": "0.1.0",
-  "description": "AI-powered collections agent with Stitch + WhatsApp + SMS/USSD integration",
+  "version": "0.2.0",
+  "description": "Agent-initiated, client-approved collections platform with WhatsApp OTP and SMS fallback",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "jest"
+    "test": "jest --runInBand",
+    "test:syntax": "node --check index.js && node --check Gfile/index.js && node --check src/utils/logger.js"
   },
-  "keywords": [
-    "ai",
-    "collections",
-    "debit-now",
-    "stitch",
-    "whatsapp",
-    "sms",
-    "ussd",
-    "arrears"
-  ],
+  "keywords": ["ai", "collections", "debit-now", "whatsapp", "sms", "otp", "payments"],
   "author": "Isaac Koketso Shaba",
   "license": "MIT",
   "dependencies": {
