@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: debit-now-weather
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm run weather:start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: WEATHER_PORT
+        value: 10000
